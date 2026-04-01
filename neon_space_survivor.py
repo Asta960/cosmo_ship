@@ -355,12 +355,14 @@ class GameEnv:
         if not done:
             reward += 1
             
-        # Сохранение шлейфов
+        # Сохранение шлейфов (ограничиваем длину, чтобы не переполнялись)
         if self.render_mode:
             self.trails.append(['player', self.player_x, self.player_y])
             for enemy in self.enemies:
                 self.trails.append(['enemy', enemy[0], enemy[1]])
-            if len(self.trails) > 10:
+            # Оставляем только последние 10 шлейфов
+            max_trails = 10
+            while len(self.trails) > max_trails:
                 self.trails.pop(0)
         
         # Обновление частиц
@@ -404,22 +406,27 @@ class GameEnv:
         surface.set_alpha(180)
         self.screen.blit(surface, (0, 0))
         
-        # Отрисовка шлейфов
+        # Отрисовка шлейфов (с проверкой корректности данных)
         for trail in self.trails:
-            if trail[0] == 'player':
-                s = pygame.Surface((PLAYER_SIZE, PLAYER_SIZE), pygame.SRCALPHA)
-                pygame.draw.polygon(s, (*COLOR_TRAIL_PLAYER[:3], 30), 
-                                   [(PLAYER_SIZE//2, 0), (0, PLAYER_SIZE), (PLAYER_SIZE, PLAYER_SIZE)])
-                self.screen.blit(s, (trail[1] - PLAYER_SIZE//2 + shake_offset[0], 
-                                     trail[2] - PLAYER_SIZE//2 + shake_offset[1]))
-            elif trail[0] == 'enemy':
-                s = pygame.Surface((40, 40), pygame.SRCALPHA)
-                pygame.draw.circle(s, (*COLOR_TRAIL_ENEMY[:3], 30), (20, 20), 20)
-                self.screen.blit(s, (trail[1] - 20 + shake_offset[0], trail[2] - 20 + shake_offset[1]))
-        
-        # Отрисовка частиц
-        for particle in self.particles:
-            particle.draw(self.screen)
+            if len(trail) >= 3 and trail[0] in ['player', 'enemy']:
+                if trail[0] == 'player':
+                    s = pygame.Surface((PLAYER_SIZE, PLAYER_SIZE), pygame.SRCALPHA)
+                    pygame.draw.polygon(s, (*COLOR_TRAIL_PLAYER[:3], 30),
+                                       [(PLAYER_SIZE//2, 0), (0, PLAYER_SIZE), (PLAYER_SIZE, PLAYER_SIZE)])
+                    self.screen.blit(s, (trail[1] - PLAYER_SIZE//2 + shake_offset[0],
+                                         trail[2] - PLAYER_SIZE//2 + shake_offset[1]))
+                elif trail[0] == 'enemy':
+                    s = pygame.Surface((40, 40), pygame.SRCALPHA)
+                    pygame.draw.circle(s, (*COLOR_TRAIL_ENEMY[:3], 30), (20, 20), 20)
+                    self.screen.blit(s, (trail[1] - 20 + shake_offset[0], trail[2] - 20 + shake_offset[1]))
+
+        # Отрисовка частиц (с защитой от отсутствия цвета)
+        for particle in self.particles[:]:
+            particle_color = getattr(particle, 'color', COLOR_TEXT)
+            if particle_color is None:
+                particle_color = COLOR_TEXT
+            size = max(1, int(getattr(particle, 'size', 3) * (particle.life / particle.max_life))) if hasattr(particle, 'max_life') and particle.max_life > 0 else 3
+            pygame.draw.circle(self.screen, particle_color, (int(particle.x), int(particle.y)), size)
             
         # Отрисовка пуль
         for bullet in self.bullets:
