@@ -377,7 +377,11 @@ class GameEnv:
         
         if self.render_mode:
             self._render_frame()
-            self._handle_events()
+            event_result = self._handle_events()
+            if event_result == 'toggle_fast':
+                return next_state, reward, done, {'toggle_fast': True}
+            elif event_result is False:
+                return next_state, reward, True, {}  # Выход из игры
             
         return next_state, reward, done, info
     
@@ -509,6 +513,8 @@ class GameEnv:
                     agent.save_model()
                 elif event.key == pygame.K_l:
                     agent.load_model()
+                elif event.key == pygame.K_ESCAPE:
+                    return False
                     
         return True
 
@@ -556,6 +562,24 @@ def main():
             
             # Шаг игры
             next_state, reward, done, info = env.step(action)
+            
+            # Проверка переключения режима (Fast/View)
+            if info.get('toggle_fast'):
+                env.render_mode = not env.render_mode
+                if env.render_mode:
+                    env.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
+                    env.clock = pygame.time.Clock()
+                    env.font = pygame.font.Font(None, 36)
+                    env.small_font = pygame.font.Font(None, 24)
+                    print("Режим: ВИЗУАЛИЗАЦИЯ (60 FPS)")
+                else:
+                    pygame.display.quit()
+                    env.screen = None
+                    env.clock = None
+                    env.font = None
+                    env.small_font = None
+                    print("Режим: БЫСТРЫЙ (без графики)")
+                continue  # Пропускаем остальную обработку этого шага
             
             # Сохранение опыта
             agent.remember(state, action, reward, next_state, done)
