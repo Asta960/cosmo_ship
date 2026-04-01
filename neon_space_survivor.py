@@ -1,200 +1,126 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Neon Space Survivor - Бесконечный раннер/шутер с ИИ агентом
-Стиль: Неоновый киберпанк
-Алгоритм: DQN (Deep Q-Network) на PyTorch
-
-ИСПРАВЛЕНИЯ:
-1. Исправлена ошибка инициализации self.generation.
-2. Шлейфы (trails) теперь корректно удаляются при переполнении.
-3. ИИ получает штраф (-5) за каждого врага, улетевшего за экран.
-4. Улучшено "зрение" ИИ: теперь он видит 3 ближайших врагов (координаты, скорость).
-
-Управление:
-- В режиме просмотра: нажмите 'F' для переключения Fast Mode, 'S' для сохранения модели, 'L' для загрузки
-- ИИ управляет кораблем автоматически
-"""
-
 import pygame
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import numpy as np
-import random
 from collections import deque
-import os
+import random
 import math
+import os
 
-# ==================== КОНСТАНТЫ ====================
+# ==========================================
+# КОНФИГУРАЦИЯ ИГРЫ
+# ==========================================
 SCREEN_WIDTH = 800
 SCREEN_HEIGHT = 600
 FPS = 60
 
-# Цвета (неоновый стиль)
+# Цвета (Neon Cyberpunk)
 COLOR_BG = (5, 5, 10)  # Почти черный
 COLOR_PLAYER = (0, 255, 255)  # Cyan
-COLOR_ENEMY = (255, 0, 255)  # Magenta
-COLOR_BULLET = (0, 255, 100)  # Lime
+COLOR_ENEMY = (255, 0, 255)   # Magenta
+COLOR_BULLET = (50, 255, 50)  # Lime
 COLOR_TEXT = (255, 255, 255)
-COLOR_TRAIL_PLAYER = (0, 255, 255, 50)
-COLOR_TRAIL_ENEMY = (255, 0, 255, 50)
-COLOR_PARTICLE = (255, 200, 100)
+COLOR_UI_BAR = (50, 50, 50)
 
-# Настройки игры
+# Параметры игры
 PLAYER_SPEED = 7
-PLAYER_SIZE = 30
-ENEMY_BASE_SPEED = 3
-ENEMY_SPAWN_RATE = 60  # Кадры между спавном
-BULLET_SPEED = 10
+BASE_ENEMY_SPEED = 3
+SPAWN_RATE = 60  # Кадры между спавном
+MAX_LIVES = 3
 
-# Настройки ИИ
-STATE_SIZE = 10  # [X игрока, 3*(x, y, speed) для 3 ближайших врагов]
-ACTION_SIZE = 3  # [Влево, Стоять, Вправо]
-GAMMA = 0.99
-LEARNING_RATE = 0.001
-MEMORY_SIZE = 10000
-BATCH_SIZE = 64
-TARGET_UPDATE = 100
-
-# ==================== НЕЙРОСЕТЬ (DQN) ====================
+# ==========================================
+# НЕЙРОСЕТЬ (DQN AGENT)
+# ==========================================
 class DQN(nn.Module):
-    """Простая нейросеть для DQN агента"""
-    def __init__(self, state_size, action_size):
+    def __init__(self, input_size, output_size):
         super(DQN, self).__init__()
-        self.fc1 = nn.Linear(state_size, 64)
-        self.fc2 = nn.Linear(64, 64)
-        self.fc3 = nn.Linear(64, action_size)
-        
-    def forward(self, x):
-        x = torch.relu(self.fc1(x))
-        x = torch.relu(self.fc2(x))
-        return self.fc3(x)
+        self.net = nn.Sequential(
+            nn.Linear(input_size, 128),
+            nn.ReLU(),
+            nn.Linear(128, 128),
+            nn.ReLU(),
+            nn.Linear(128, output_size)
+        )
 
-# ==================== АГЕНТ ИИ ====================
+    def forward(self, x):
+        return self.net(x)
+
 class AIAgent:
-    """DQN агент для обучения с подкреплением"""
     def __init__(self, state_size, action_size):
         self.state_size = state_size
         self.action_size = action_size
-        self.epsilon = 1.0  # Вероятность случайного действия (exploration)
+        self.memory = deque(maxlen=10000)
+        self.gamma = 0.95
+        self.epsilon = 1.0
         self.epsilon_min = 0.01
         self.epsilon_decay = 0.995
-        self.learning_rate = LEARNING_RATE
-        self.gamma = GAMMA
+        self.learning_rate = 0.001
         
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.memory = deque(maxlen=MEMORY_SIZE)
-        
         self.model = DQN(state_size, action_size).to(self.device)
         self.target_model = DQN(state_size, action_size).to(self.device)
         self.optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate)
-        
+        self.criterion = nn.MSELoss()
         self.update_target_model()
-        
+
     def update_target_model(self):
-        """Обновление целевой сети"""
         self.target_model.load_state_dict(self.model.state_dict())
-        
+
     def remember(self, state, action, reward, next_state, done):
-        """Сохранение опыта в память"""
         self.memory.append((state, action, reward, next_state, done))
-        
+
     def act(self, state, training=True):
-        """Выбор действия на основе состояния"""
-        if training and np.random.rand() <= self.epsilon:
-            return random.randrange(self.action_size)
+        if training and random.random() <= self.epsilon:
+            return random.randint(0, self.action_size - 1)
         
-        state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
         with torch.no_grad():
+            state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
             q_values = self.model(state_tensor)
-        return q_values.argmax().item()
-    
-    def get_action_probabilities(self, state):
-        """Получение вероятностей действий для визуализации"""
-        state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
-        with torch.no_grad():
-            q_values = self.model(state_tensor)
-            probs = torch.softmax(q_values, dim=1).cpu().numpy()[0]
-        return probs
-    
-    def replay(self):
-        """Обучение на батче из памяти"""
-        if len(self.memory) < BATCH_SIZE:
+            return torch.argmax(q_values[0]).item()
+
+    def replay(self, batch_size):
+        if len(self.memory) < batch_size:
             return
         
-        batch = random.sample(self.memory, BATCH_SIZE)
-        states, actions, rewards, next_states, dones = zip(*batch)
+        minibatch = random.sample(self.memory, batch_size)
+        states, actions, rewards, next_states, dones = zip(*minibatch)
         
         states = torch.FloatTensor(np.array(states)).to(self.device)
         actions = torch.LongTensor(actions).to(self.device)
         rewards = torch.FloatTensor(rewards).to(self.device)
         next_states = torch.FloatTensor(np.array(next_states)).to(self.device)
         dones = torch.FloatTensor(dones).to(self.device)
-        
-        # Текущие Q-значения
+
         current_q = self.model(states).gather(1, actions.unsqueeze(1))
-        
-        # Следующие Q-значения (из целевой сети)
         next_q = self.target_model(next_states).detach().max(1)[0]
         target_q = rewards + (1 - dones) * self.gamma * next_q
+
+        loss = self.criterion(current_q, target_q.unsqueeze(1))
         
-        # Потеря и оптимизация
-        loss = nn.MSELoss()(current_q.squeeze(), target_q)
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
-        
-        # Уменьшение exploration
+
         if self.epsilon > self.epsilon_min:
             self.epsilon *= self.epsilon_decay
-            
-    def save_model(self, filename="neon_survivor_model.pth"):
-        """Сохранение весов модели"""
-        torch.save({
-            'model_state_dict': self.model.state_dict(),
-            'epsilon': self.epsilon,
-        }, filename)
+
+    def save(self, filename="model.pth"):
+        torch.save(self.model.state_dict(), filename)
         print(f"Модель сохранена в {filename}")
-        
-    def load_model(self, filename="neon_survivor_model.pth"):
-        """Загрузка весов модели"""
+
+    def load(self, filename="model.pth"):
         if os.path.exists(filename):
-            checkpoint = torch.load(filename, map_location=self.device)
-            self.model.load_state_dict(checkpoint['model_state_dict'])
-            self.epsilon = checkpoint.get('epsilon', 0.01)
+            self.model.load_state_dict(torch.load(filename, map_location=self.device))
             self.update_target_model()
             print(f"Модель загружена из {filename}")
             return True
         return False
 
-# ==================== ЧАСТИЦЫ ====================
-class Particle:
-    """Класс частицы для эффектов взрыва"""
-    def __init__(self, x, y, color):
-        self.x = x
-        self.y = y
-        self.vx = random.uniform(-5, 5)
-        self.vy = random.uniform(-5, 5)
-        self.color = color
-        self.life = random.randint(20, 40)
-        self.max_life = self.life
-        self.size = random.randint(2, 5)
-        
-    def update(self):
-        self.x += self.vx
-        self.y += self.vy
-        self.life -= 1
-        self.vy += 0.2  # Гравитация
-        
-    def draw(self, screen):
-        alpha = int(255 * (self.life / self.max_life))
-        size = max(1, int(self.size * (self.life / self.max_life)))
-        pygame.draw.circle(screen, self.color, (int(self.x), int(self.y)), size)
-
-# ==================== ИГРОВОЕ ОКРУЖЕНИЕ ====================
+# ==========================================
+# ИГРОВАЯ СРЕДА (ENV)
+# ==========================================
 class GameEnv:
-    """Основной класс игры с логикой и отрисовкой"""
     def __init__(self, render=True):
         self.render_mode = render
         self.screen = None
@@ -202,449 +128,404 @@ class GameEnv:
         self.font = None
         self.small_font = None
         
-        # Статистика (инициализируем ДО reset())
-        self.generation = 0
-        self.total_frames = 0
-        
-        if self.render_mode:
-            pygame.init()
-            self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
-            pygame.display.set_caption("Neon Space Survivor - AI Agent")
-            self.clock = pygame.time.Clock()
-            self.font = pygame.font.Font(None, 36)
-            self.small_font = pygame.font.Font(None, 24)
-            
-        self.reset()
-        
-        # Для эффектов
-        self.trails = []  # Шлейфы объектов
-        self.particles = []  # Частицы взрывов
-        self.shake_time = 0  # Время тряски экрана
-        
-    def reset(self):
-        """Сброс игры в начальное состояние"""
+        # Состояние игры
         self.player_x = SCREEN_WIDTH // 2
-        self.player_y = SCREEN_HEIGHT - 80
-        self.enemies = []  # Список врагов: [x, y, speed]
-        self.bullets = []  # Список пуль: [x, y]
+        self.lives = MAX_LIVES
         self.score = 0
-        self.game_over = False
+        self.generation = 0
         self.frame_count = 0
+        self.difficulty_multiplier = 1.0
+        
+        # Объекты
+        self.enemies = []
+        self.particles = []
+        self.trails = []  # Шлейфы
+        
+        # Таймеры
+        self.spawn_timer = 0
+        self.difficulty_timer = 0
+        
+        # Для отрисовки мыслей ИИ
+        self.last_q_values = [0, 0, 0]
+        
+        # Флаг тряски экрана
+        self.shake_offset = (0, 0)
+        self.shake_duration = 0
+
+        if self.render_mode:
+            self._init_pygame()
+
+    def _init_pygame(self):
+        if not pygame.get_init():
+            pygame.init()
+        self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
+        pygame.display.set_caption("Neon Space Survivor - AI Agent")
+        self.clock = pygame.time.Clock()
+        self.font = pygame.font.SysFont("Arial", 24, bold=True)
+        self.small_font = pygame.font.SysFont("Arial", 18)
+
+    def reset(self):
+        """Перезапуск игры (смерть или новый эпизод)"""
+        self.player_x = SCREEN_WIDTH // 2
+        self.lives = MAX_LIVES
+        self.score = 0
+        self.enemies = []
+        self.particles = []
+        self.trails = []
         self.spawn_timer = 0
         self.difficulty_multiplier = 1.0
-        self.last_enemy_distance = SCREEN_HEIGHT
-        self.lives = 3  # Количество жизней
-        
-        # Очистка эффектов
-        self.trails = []
-        self.particles = []
-        self.shake_time = 0
-        
+        self.difficulty_timer = 0
+        self.frame_count = 0
         self.generation += 1
+        self.shake_duration = 0
+        self.shake_offset = (0, 0)
         
+        # Очистка экрана при рестарте в режиме рендера
+        if self.render_mode and self.screen:
+            self.screen.fill(COLOR_BG)
+            pygame.display.flip()
+            
         return self._get_state()
-    
+
     def _get_state(self):
-        """
-        Получение текущего состояния для ИИ.
-        ИСПРАВЛЕНИЕ 4: ИИ видит 3 ближайших врагов.
-        Структура: [PlayerX, E1_x, E1_y, E1_v, E2_x, E2_y, E2_v, E3_x, E3_y, E3_v]
-        Если врагов меньше 3, заполняем нулями.
-        """
-        # Нормализованные значения
-        player_x_norm = self.player_x / SCREEN_WIDTH
+        """Формирование вектора состояния для ИИ"""
+        # Нормализация данных
+        norm_player_x = self.player_x / SCREEN_WIDTH
         
-        # Сортируем врагов по расстоянию до игрока (по Y)
-        sorted_enemies = sorted(self.enemies, key=lambda e: e[1])
+        # Находим 3 ближайших врагов (сортируем по расстоянию до игрока)
+        player_y = SCREEN_HEIGHT - 50
+        nearby_enemies = []
         
-        # Берем топ-3 ближайших врагов
-        targets = sorted_enemies[:3]
+        for e in self.enemies:
+            dist = math.hypot(e['x'] - self.player_x, e['y'] - player_y)
+            nearby_enemies.append({
+                'dist': dist,
+                'x': e['x'],
+                'y': e['y'],
+                'speed': e['speed']
+            })
         
-        state = [player_x_norm]
+        # Сортируем и берем топ-3
+        nearby_enemies.sort(key=lambda k: k['dist'])
+        top_3 = nearby_enemies[:3]
         
+        state_data = [norm_player_x, self.lives / MAX_LIVES]
+        
+        # Добавляем данные о 3 врагах (если меньше 3, заполняем нулями/максимумом)
         for i in range(3):
-            if i < len(targets):
-                e = targets[i]
-                # Нормализация координат и скорости
-                state.append(e[0] / SCREEN_WIDTH)  # x
-                state.append(e[1] / SCREEN_HEIGHT)  # y
-                state.append(e[2] / (ENEMY_BASE_SPEED * 3))  # speed (нормализованная)
+            if i < len(top_3):
+                e = top_3[i]
+                state_data.append(e['x'] / SCREEN_WIDTH)
+                state_data.append(e['y'] / SCREEN_HEIGHT)
+                state_data.append(e['speed'] / (BASE_ENEMY_SPEED * 2))
+                state_data.append((e['x'] - self.player_x) / SCREEN_WIDTH)
             else:
-                # Заполнители, если врагов мало
-                state.extend([0, 0, 0])
-                
-        return np.array(state, dtype=np.float32)
-    
+                state_data.extend([0, 0, 0, 0])
+        
+        return np.array(state_data, dtype=np.float32)
+
     def step(self, action):
         """
-        Выполнение шага игры
-        action: 0=Влево, 1=Стоять, 2=Вправо
-        Возвращает: (state, reward, done, info)
+        Выполнение шага игры.
+        Action: 0 - Влево, 1 - Стоять, 2 - Вправо
         """
         reward = 0
         done = False
         info = {}
-        
-        # Обработка действия игрока
-        if action == 0:  # Влево
-            self.player_x = max(PLAYER_SIZE, self.player_x - PLAYER_SPEED)
-        elif action == 2:  # Вправо
-            self.player_x = min(SCREEN_WIDTH - PLAYER_SIZE, self.player_x + PLAYER_SPEED)
-        # action == 1: Стоять - ничего не делаем
-        
-        # Автоматическая стрельба каждые 15 кадров
-        if self.frame_count % 15 == 0:
-            self.bullets.append([self.player_x, self.player_y - 20])
-        
-        # Обновление пуль
-        for bullet in self.bullets[:]:
-            bullet[1] -= BULLET_SPEED
-            if bullet[1] < 0:
-                self.bullets.remove(bullet)
-                
-        # Спавн врагов
-        self.spawn_timer += 1
-        spawn_rate = max(20, int(ENEMY_SPAWN_RATE / self.difficulty_multiplier))
-        
-        if self.spawn_timer >= spawn_rate:
-            self.spawn_timer = 0
-            enemy_x = random.randint(50, SCREEN_WIDTH - 50)
-            enemy_speed = ENEMY_BASE_SPEED * self.difficulty_multiplier * random.uniform(0.8, 1.2)
-            self.enemies.append([enemy_x, -30, enemy_speed])
-            
-        # Обновление врагов
-        for enemy in self.enemies[:]:
-            enemy[1] += enemy[2]
-            
-            # Проверка столкновения с пулей
-            for bullet in self.bullets[:]:
-                if abs(bullet[0] - enemy[0]) < 25 and abs(bullet[1] - enemy[1]) < 25:
-                    if enemy in self.enemies:
-                        self.enemies.remove(enemy)
-                    if bullet in self.bullets:
-                        self.bullets.remove(bullet)
-                    self.score += 10
-                    reward += 10
-                    self._create_explosion(enemy[0], enemy[1], COLOR_ENEMY)
-                    break
-                    
-            # Проверка выхода за экран (враг пролетел мимо)
-            if enemy[1] > SCREEN_HEIGHT + 50:
-                self.enemies.remove(enemy)
-                # ИСПРАВЛЕНИЕ 3: Штраф за пропуск врага
-                reward -= 5
-                self._create_explosion(enemy[0], SCREEN_HEIGHT, COLOR_ENEMY, count=5)
-                
-        # Увеличение сложности каждые 10 секунд (600 кадров)
-        if self.frame_count % 600 == 0 and self.frame_count > 0:
-            self.difficulty_multiplier *= 1.1
-            
-        # Проверка столкновения с игроком
-        player_rect = pygame.Rect(self.player_x - PLAYER_SIZE//2, self.player_y - PLAYER_SIZE//2, 
-                                   PLAYER_SIZE, PLAYER_SIZE)
-        
-        hit_enemy = None
-        for enemy in self.enemies[:]:
-            enemy_rect = pygame.Rect(enemy[0] - 20, enemy[1] - 20, 40, 40)
-            if player_rect.colliderect(enemy_rect):
-                hit_enemy = enemy
-                break
-        
-        if hit_enemy:
-            self.lives -= 1
-            reward = -50
-            self._create_explosion(self.player_x, self.player_y, COLOR_PLAYER, count=30)
-            self.shake_time = 15
-            self.enemies.remove(hit_enemy)
-            
-            if self.lives <= 0:
-                done = True
-                reward = -100
-                
-        # Награда за выживание
-        if not done:
-            reward += 1
-            
-        # Сохранение шлейфов (ограничиваем длину, чтобы не переполнялись)
-        if self.render_mode:
-            self.trails.append(['player', self.player_x, self.player_y])
-            for enemy in self.enemies:
-                self.trails.append(['enemy', enemy[0], enemy[1]])
-            # Оставляем только последние 10 шлейфов
-            max_trails = 10
-            while len(self.trails) > max_trails:
-                self.trails.pop(0)
-        
-        # Обновление частиц
-        for particle in self.particles[:]:
-            particle.update()
-            if particle.life <= 0:
-                self.particles.remove(particle)
-                
-        self.frame_count += 1
-        self.total_frames += 1
-        self.last_enemy_distance = min([e[1] - self.player_y for e in self.enemies], default=SCREEN_HEIGHT)
-        
-        next_state = self._get_state()
-        
-        if self.render_mode:
-            self._render_frame()
-            event_result = self._handle_events()
-            if event_result == 'toggle_fast':
-                return next_state, reward, done, {'toggle_fast': True}
-            elif event_result is False:
-                return next_state, reward, True, {}  # Выход из игры
-            
-        return next_state, reward, done, info
-    
-    def _create_explosion(self, x, y, color, count=20):
-        """Создание взрыва частиц"""
-        for _ in range(count):
-            self.particles.append(Particle(x, y, color))
-            
-    def _render_frame(self):
-        """Отрисовка кадра"""
-        # Тряска экрана
-        shake_offset = (0, 0)
-        if self.shake_time > 0:
-            shake_offset = (random.randint(-5, 5), random.randint(-5, 5))
-            self.shake_time -= 1
-            
-        # Очистка экрана с полупрозрачностью для эффекта шлейфа
-        surface = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT))
-        surface.fill(COLOR_BG)
-        surface.set_alpha(180)
-        self.screen.blit(surface, (0, 0))
-        
-        # Отрисовка шлейфов (с проверкой корректности данных)
-        for trail in self.trails:
-            if len(trail) >= 3 and trail[0] in ['player', 'enemy']:
-                if trail[0] == 'player':
-                    s = pygame.Surface((PLAYER_SIZE, PLAYER_SIZE), pygame.SRCALPHA)
-                    pygame.draw.polygon(s, (*COLOR_TRAIL_PLAYER[:3], 30),
-                                       [(PLAYER_SIZE//2, 0), (0, PLAYER_SIZE), (PLAYER_SIZE, PLAYER_SIZE)])
-                    self.screen.blit(s, (trail[1] - PLAYER_SIZE//2 + shake_offset[0],
-                                         trail[2] - PLAYER_SIZE//2 + shake_offset[1]))
-                elif trail[0] == 'enemy':
-                    s = pygame.Surface((40, 40), pygame.SRCALPHA)
-                    pygame.draw.circle(s, (*COLOR_TRAIL_ENEMY[:3], 30), (20, 20), 20)
-                    self.screen.blit(s, (trail[1] - 20 + shake_offset[0], trail[2] - 20 + shake_offset[1]))
 
-        # Отрисовка частиц (с защитой от отсутствия цвета)
-        for particle in self.particles[:]:
-            particle_color = getattr(particle, 'color', COLOR_TEXT)
-            if particle_color is None:
-                particle_color = COLOR_TEXT
-            size = max(1, int(getattr(particle, 'size', 3) * (particle.life / particle.max_life))) if hasattr(particle, 'max_life') and particle.max_life > 0 else 3
-            pygame.draw.circle(self.screen, particle_color, (int(particle.x), int(particle.y)), size)
+        # 1. Движение игрока
+        if action == 0: # Влево
+            self.player_x -= PLAYER_SPEED
+        elif action == 2: # Вправо
+            self.player_x += PLAYER_SPEED
+        # Ограничение границами
+        self.player_x = max(20, min(SCREEN_WIDTH - 20, self.player_x))
+
+        # 2. Спавн врагов
+        current_spawn_rate = int(SPAWN_RATE / self.difficulty_multiplier)
+        if self.spawn_timer >= current_spawn_rate:
+            self._spawn_enemy()
+            self.spawn_timer = 0
+        else:
+            self.spawn_timer += 1
+
+        # 3. Обновление врагов и коллизии
+        enemies_to_remove = []
+        
+        # Хитбокс игрока (треугольник примерно)
+        player_rect = pygame.Rect(self.player_x - 15, SCREEN_HEIGHT - 60, 30, 30)
+
+        for i, enemy in enumerate(self.enemies):
+            enemy['y'] += enemy['speed']
             
-        # Отрисовка пуль
-        for bullet in self.bullets:
-            pygame.draw.circle(self.screen, COLOR_BULLET, 
-                              (bullet[0] + shake_offset[0], bullet[1] + shake_offset[1]), 5)
-            
-        # Отрисовка врагов
-        for enemy in self.enemies:
-            pygame.draw.circle(self.screen, COLOR_ENEMY, 
-                              (enemy[0] + shake_offset[0], enemy[1] + shake_offset[1]), 20)
-            # Неоновое свечение
-            pygame.draw.circle(self.screen, (200, 100, 200), 
-                              (enemy[0] + shake_offset[0], enemy[1] + shake_offset[1]), 25, 2)
-            
-        # Отрисовка игрока (треугольник)
-        player_points = [
-            (self.player_x + shake_offset[0], self.player_y - PLAYER_SIZE//2 + shake_offset[1]),
-            (self.player_x - PLAYER_SIZE//2 + shake_offset[0], self.player_y + PLAYER_SIZE//2 + shake_offset[1]),
-            (self.player_x + PLAYER_SIZE//2 + shake_offset[0], self.player_y + PLAYER_SIZE//2 + shake_offset[1])
-        ]
-        pygame.draw.polygon(self.screen, COLOR_PLAYER, player_points)
-        # Неоновое свечение
-        pygame.draw.polygon(self.screen, (100, 200, 200), player_points, 2)
+            # Проверка столкновения
+            enemy_rect = pygame.Rect(enemy['x'] - 15, enemy['y'] - 15, 30, 30)
+            if player_rect.colliderect(enemy_rect):
+                # Столкновение!
+                self.lives -= 1
+                reward -= 50  # Большой штраф за удар
+                self._create_explosion(enemy['x'], enemy['y'], COLOR_ENEMY)
+                self._create_explosion(self.player_x, SCREEN_HEIGHT - 50, COLOR_PLAYER)
+                self._trigger_screen_shake()
+                enemies_to_remove.append(i)
+                continue
+
+            # Проверка выхода за экран (враг пролетел мимо)
+            if enemy['y'] > SCREEN_HEIGHT + 50:
+                self.lives -= 1
+                reward -= 10  # Штраф за пропуск врага ("ему будет плохо")
+                enemies_to_remove.append(i)
+                continue
+
+        # Удаляем обработанных врагов (с конца списка, чтобы не сбить индексы)
+        for i in reversed(enemies_to_remove):
+            if i < len(self.enemies):
+                del self.enemies[i]
+
+        # 4. Награды
+        reward += 0.1  # Маленькая награда за выживание каждый кадр
         
-        # Отрисовка интерфейса
-        self._draw_ui()
-        
-        pygame.display.flip()
-        
-        if self.clock:
-            self.clock.tick(FPS)
-            
-    def _draw_ui(self):
-        """Отрисовка пользовательского интерфейса"""
-        # Счет
-        score_text = self.font.render(f"Счет: {self.score}", True, COLOR_TEXT)
-        self.screen.blit(score_text, (10, 10))
-        
-        # Жизни
-        lives_text = self.font.render(f"Жизни: {self.lives}", True, (255, 100, 100))
-        self.screen.blit(lives_text, (10, 50))
-        
-        # Поколение
-        gen_text = self.font.render(f"Поколение: {self.generation}", True, COLOR_TEXT)
-        self.screen.blit(gen_text, (10, 90))
-        
-        # Сложность
-        diff_text = self.small_font.render(f"Сложность: {self.difficulty_multiplier:.2f}x", True, COLOR_TEXT)
-        self.screen.blit(diff_text, (10, 130))
-        
-        # FPS
-        fps_text = self.small_font.render(f"FPS: {int(self.clock.get_fps())}", True, COLOR_TEXT)
-        self.screen.blit(fps_text, (SCREEN_WIDTH - 100, 10))
-        
-        # Мысли ИИ (вероятности действий)
-        state = self._get_state()
-        probs = agent.get_action_probabilities(state) if 'agent' in globals() else [0.33, 0.33, 0.34]
-        
-        actions = ["Влево", "Стоять", "Вправо"]
-        colors = [(255, 100, 100), (100, 255, 100), (100, 100, 255)]
-        
-        ui_x = SCREEN_WIDTH - 200
-        ui_y = SCREEN_HEIGHT - 120
-        
-        bg_surface = pygame.Surface((190, 110), pygame.SRCALPHA)
-        bg_surface.fill((20, 20, 30, 200))
-        self.screen.blit(bg_surface, (ui_x - 5, ui_y - 5))
-        
-        title_text = self.small_font.render("Мысли ИИ:", True, COLOR_TEXT)
-        self.screen.blit(title_text, (ui_x, ui_y))
-        
-        for i, (action, prob, color) in enumerate(zip(actions, probs, colors)):
-            bar_width = int(150 * prob)
-            bar_height = 20
-            bar_y = ui_y + 25 + i * 28
-            
-            # Фон полоски
-            pygame.draw.rect(self.screen, (50, 50, 50), (ui_x, bar_y, 150, bar_height))
-            # Заполнение
-            pygame.draw.rect(self.screen, color, (ui_x, bar_y, bar_width, bar_height))
-            # Текст
-            text = self.small_font.render(f"{action}: {prob*100:.1f}%", True, COLOR_TEXT)
-            self.screen.blit(text, (ui_x + 5, bar_y + 2))
-            
+        # Проверка конца игры
+        if self.lives <= 0:
+            done = True
+            reward -= 100 # Финальный штраф за смерть
+            # generation увеличивается только при полном геймовере (в reset)
+
+        # 5. Прогрессия сложности (каждые 10 секунд ~ 600 кадров)
+        self.frame_count += 1
+        if self.frame_count % 600 == 0:
+            self.difficulty_multiplier *= 1.1
+            # Увеличиваем скорость существующих врагов
+            for e in self.enemies:
+                e['speed'] *= 1.1
+
+        # 6. Отрисовка (если нужно)
+        if self.render_mode:
+            self._render(action)
+            # Обработка событий внутри шага для быстрого выхода или переключения
+            event_signal = self._handle_events()
+            if event_signal == 'quit':
+                done = True
+            elif event_signal == 'toggle_fast':
+                info['toggle_fast'] = True
+
+        next_state = self._get_state()
+        return next_state, reward, done, info
+
+    def _spawn_enemy(self):
+        x = random.randint(40, SCREEN_WIDTH - 40)
+        speed = BASE_ENEMY_SPEED * self.difficulty_multiplier * random.uniform(0.8, 1.2)
+        self.enemies.append({
+            'x': x,
+            'y': -30,
+            'speed': speed,
+            'color': COLOR_ENEMY
+        })
+
+    def _create_explosion(self, x, y, color):
+        for _ in range(20):
+            self.particles.append({
+                'x': x,
+                'y': y,
+                'vx': random.uniform(-5, 5),
+                'vy': random.uniform(-5, 5),
+                'life': 1.0,
+                'color': color
+            })
+
+    def _trigger_screen_shake(self):
+        self.shake_duration = 15  # 15 кадров тряски
+
     def _handle_events(self):
-        """Обработка событий"""
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
-                return False
-                
+                return 'quit'
             if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    return 'quit'
                 if event.key == pygame.K_f:
                     return 'toggle_fast'
-                elif event.key == pygame.K_s:
-                    agent.save_model()
-                elif event.key == pygame.K_l:
-                    agent.load_model()
-                elif event.key == pygame.K_ESCAPE:
-                    return False
-                    
-        return True
+                if event.key == pygame.K_s:
+                    agent.save()
+                if event.key == pygame.K_l:
+                    agent.load()
+        return None
 
-# ==================== ГЛАВНЫЙ ЦИКЛ ====================
+    def _render(self, action):
+        # Обработка тряски экрана
+        shake_x, shake_y = 0, 0
+        if self.shake_duration > 0:
+            shake_x = random.randint(-5, 5)
+            shake_y = random.randint(-5, 5)
+            self.shake_duration -= 1
+
+        # Очистка с эффектом шлейфа (полупрозрачный прямоугольник)
+        s = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT))
+        s.set_alpha(40)
+        s.fill(COLOR_BG)
+        self.screen.blit(s, (0, 0))
+
+        # Отрисовка игрока (Треугольник) с учетом тряски
+        pts = [
+            (self.player_x + shake_x, SCREEN_HEIGHT - 80 + shake_y),
+            (self.player_x - 20 + shake_x, SCREEN_HEIGHT - 30 + shake_y),
+            (self.player_x + 20 + shake_x, SCREEN_HEIGHT - 30 + shake_y)
+        ]
+        pygame.draw.polygon(self.screen, COLOR_PLAYER, pts)
+        pygame.draw.polygon(self.screen, (100, 255, 255), pts, 2)
+
+        # Отрисовка врагов
+        for e in self.enemies:
+            ex, ey = int(e['x'] + shake_x), int(e['y'] + shake_y)
+            pygame.draw.circle(self.screen, e['color'], (ex, ey), 15)
+            pygame.draw.circle(self.screen, (255, 100, 255), (ex, ey), 15, 2)
+
+        # Отрисовка частиц
+        for p in self.particles[:]:
+            p['x'] += p['vx']
+            p['y'] += p['vy']
+            p['life'] -= 0.05
+            if p['life'] <= 0:
+                self.particles.remove(p)
+            else:
+                radius = max(1, int(5 * p['life']))
+                c = tuple(int(val * p['life']) for val in p['color'])
+                px, py = int(p['x'] + shake_x), int(p['y'] + shake_y)
+                pygame.draw.circle(self.screen, c, (px, py), radius)
+
+        # Отрисовка интерфейса (без тряски)
+        score_text = self.font.render(f"Счет: {int(self.score)}", True, COLOR_TEXT)
+        lives_color = (255, 50, 50) if self.lives == 1 else COLOR_TEXT
+        lives_text = self.font.render(f"Жизни: {self.lives}", True, lives_color)
+        gen_text = self.small_font.render(f"Поколение: {self.generation}", True, COLOR_TEXT)
+        diff_text = self.small_font.render(f"Сложность: {self.difficulty_multiplier:.1f}x", True, COLOR_TEXT)
+        
+        self.screen.blit(score_text, (10, 10))
+        self.screen.blit(lives_text, (10, 45))
+        self.screen.blit(gen_text, (10, SCREEN_HEIGHT - 30))
+        self.screen.blit(diff_text, (10, SCREEN_HEIGHT - 55))
+
+        # Визуализация мыслей ИИ (Q-values)
+        self._draw_ai_thoughts(action)
+
+        pygame.display.flip()
+        if self.clock:
+            self.clock.tick(FPS)
+
+    def _draw_ai_thoughts(self, action):
+        labels = ["Влево", "Стоять", "Вправо"]
+        colors = [(0, 100, 255), (200, 200, 200), (255, 100, 0)]
+        
+        start_x = SCREEN_WIDTH - 150
+        start_y = 10
+        
+        for i, label in enumerate(labels):
+            y = start_y + i * 25
+            pygame.draw.rect(self.screen, COLOR_UI_BAR, (start_x, y, 140, 20))
+            
+            width = 0
+            if i == action:
+                width = 140
+                color = (0, 255, 0)
+            else:
+                width = 20
+                color = (100, 100, 100)
+                
+            pygame.draw.rect(self.screen, color, (start_x, y, width, 20))
+            
+            text = self.small_font.render(f"{label}", True, COLOR_TEXT)
+            self.screen.blit(text, (start_x + 5, y + 2))
+
+# ==========================================
+# ГЛАВНЫЙ ЦИКЛ
+# ==========================================
+agent = None  # Глобальная переменная для доступа из обработчиков событий
+
 def main():
     global agent
     
-    print("=" * 50)
+    print("==================================================")
     print("NEON SPACE SURVIVOR - AI AGENT")
-    print("=" * 50)
+    print("==================================================")
     print("\nУправление:")
     print("  F - Переключение Fast/View режима")
     print("  S - Сохранить модель")
     print("  L - Загрузить модель")
     print("  ESC - Выход")
-    print("\nЗапуск в режиме просмотра...")
-    print("=" * 50)
-    
-    # Создание агента
-    agent = AIAgent(STATE_SIZE, ACTION_SIZE)
-    
-    # Попытка загрузить существующую модель
-    if not agent.load_model():
-        print("Новая модель создана.")
-    
-    # Создание окружения (начинаем в режиме просмотра)
+    print("==================================================\n")
+
+    # Инициализация среды (начинаем в режиме просмотра)
     env = GameEnv(render=True)
     
-    running = True
-    episode = 0
-    total_reward = 0
+    # Параметры состояния: 1 (player_x) + 1 (lives) + 3 врага * 4 параметра = 14
+    state_size = 14 
+    action_size = 3 # Влево, Стоять, Вправо
     
-    # Статистика для отображения
-    avg_reward = 0
-    rewards_history = []
+    agent = AIAgent(state_size, action_size)
+    
+    # Попытка загрузить последнюю модель
+    if not agent.load():
+        print("Новая модель создана.")
+    
+    batch_size = 64
+    total_episodes = 0
+    
+    state = env.reset()
+    running = True
     
     while running:
-        state = env.reset()
-        done = False
-        episode_reward = 0
+        # Выбор действия
+        action = agent.act(state, training=True)
         
-        while not done and running:
-            # Выбор действия
-            action = agent.act(state, training=True)
-            
-            # Шаг игры
-            next_state, reward, done, info = env.step(action)
-            
-            # Проверка переключения режима (Fast/View)
-            if info.get('toggle_fast'):
-                env.render_mode = not env.render_mode
-                if env.render_mode:
-                    env.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
-                    env.clock = pygame.time.Clock()
-                    env.font = pygame.font.Font(None, 36)
-                    env.small_font = pygame.font.Font(None, 24)
-                    print("Режим: ВИЗУАЛИЗАЦИЯ (60 FPS)")
-                else:
+        # Шаг игры
+        next_state, reward, done, info = env.step(action)
+        
+        # Запоминание опыта
+        agent.remember(state, action, reward, next_state, done)
+        
+        # Обучение
+        if len(agent.memory) > batch_size:
+            agent.replay(batch_size)
+        
+        state = next_state
+        
+        # Обработка переключения режима
+        if info.get('toggle_fast'):
+            env.render_mode = not env.render_mode
+            if env.render_mode:
+                print("Переключено в режим просмотра (View Mode)")
+                env._init_pygame()
+                env._render(action)
+            else:
+                print("Переключено в быстрый режим (Fast Mode) - графика отключена")
+                if env.screen:
                     pygame.display.quit()
                     env.screen = None
                     env.clock = None
                     env.font = None
                     env.small_font = None
-                    print("Режим: БЫСТРЫЙ (без графики)")
-                continue  # Пропускаем остальную обработку этого шага
-            
-            # Сохранение опыта
-            agent.remember(state, action, reward, next_state, done)
-            
-            state = next_state
-            episode_reward += reward
-            total_reward += reward
-            
-            # Обучение
-            agent.replay()
-            
-            # Обновление целевой сети
-            if env.total_frames % TARGET_UPDATE == 0:
-                agent.update_target_model()
-                
-        # Конец эпизода
-        episode += 1
-        rewards_history.append(episode_reward)
         
-        # Скользящее среднее
-        if len(rewards_history) > 10:
-            rewards_history.pop(0)
-        avg_reward = sum(rewards_history) / len(rewards_history)
-        
-        # Вывод статистики каждые 10 эпизодов
-        if episode % 10 == 0:
-            print(f"Эпизод {episode}, Средняя награда: {avg_reward:.1f}, Epsilon: {agent.epsilon:.3f}")
+        if done:
+            total_episodes += 1
+            if total_episodes % 10 == 0:
+                print(f"Эпизодов: {total_episodes}, Epsilon: {agent.epsilon:.2f}, Score: {env.score}")
             
-        # Сохранение модели каждые 100 эпизодов
-        if episode % 100 == 0:
-            agent.save_model()
+            # Авто-рестарт
+            state = env.reset()
             
-    pygame.quit()
-    print(f"\nИгра завершена. Всего эпизодов: {episode}")
-    print(f"Средняя награда: {avg_reward:.1f}")
+            # Если окно закрыто (Fast Mode), проверяем возможность выхода через консоль
+            # Но для простоты оставим только переключение через F в View Mode
+            
+    if env.screen:
+        pygame.quit()
+    print("Игра завершена.")
 
 if __name__ == "__main__":
     try:
         main()
-    except KeyboardInterrupt:
-        print("\n\nИгра прервана пользователем.")
-        pygame.quit()
     except Exception as e:
-        print(f"\nОшибка: {e}")
+        print(f"Критическая ошибка: {e}")
         import traceback
         traceback.print_exc()
-        pygame.quit()
+        if pygame.get_init():
+            pygame.quit()
