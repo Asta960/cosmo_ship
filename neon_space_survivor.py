@@ -196,6 +196,10 @@ class GameEnv:
         self.font = None
         self.small_font = None
         
+        # Статистика (инициализируем ДО reset())
+        self.generation = 0
+        self.total_frames = 0
+        
         if self.render_mode:
             pygame.init()
             self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
@@ -210,10 +214,6 @@ class GameEnv:
         self.trails = []  # Шлейфы объектов
         self.particles = []  # Частицы взрывов
         self.shake_time = 0  # Время тряски экрана
-        
-        # Статистика
-        self.generation = 0
-        self.total_frames = 0
         
     def reset(self):
         """Сброс игры в начальное состояние"""
