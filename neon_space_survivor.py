@@ -233,6 +233,7 @@ class GameEnv:
         self.spawn_timer = 0
         self.difficulty_multiplier = 1.0
         self.last_enemy_distance = SCREEN_HEIGHT
+        self.lives = 3  # Количество жизней
         
         # Очистка эффектов
         self.trails = []
@@ -342,14 +343,23 @@ class GameEnv:
         player_rect = pygame.Rect(self.player_x - PLAYER_SIZE//2, self.player_y - PLAYER_SIZE//2, 
                                    PLAYER_SIZE, PLAYER_SIZE)
         
+        hit_enemy = None
         for enemy in self.enemies[:]:
             enemy_rect = pygame.Rect(enemy[0] - 20, enemy[1] - 20, 40, 40)
             if player_rect.colliderect(enemy_rect):
+                hit_enemy = enemy
+                break
+        
+        if hit_enemy:
+            self.lives -= 1
+            reward = -50
+            self._create_explosion(self.player_x, self.player_y, COLOR_PLAYER, count=30)
+            self.shake_time = 15
+            self.enemies.remove(hit_enemy)
+            
+            if self.lives <= 0:
                 done = True
                 reward = -100
-                self._create_explosion(self.player_x, self.player_y, COLOR_PLAYER, count=50)
-                self.shake_time = 20
-                break
                 
         # Награда за выживание
         if not done:
@@ -465,13 +475,17 @@ class GameEnv:
         score_text = self.font.render(f"Счет: {self.score}", True, COLOR_TEXT)
         self.screen.blit(score_text, (10, 10))
         
+        # Жизни
+        lives_text = self.font.render(f"Жизни: {self.lives}", True, (255, 100, 100))
+        self.screen.blit(lives_text, (10, 50))
+        
         # Поколение
         gen_text = self.font.render(f"Поколение: {self.generation}", True, COLOR_TEXT)
-        self.screen.blit(gen_text, (10, 50))
+        self.screen.blit(gen_text, (10, 90))
         
         # Сложность
         diff_text = self.small_font.render(f"Сложность: {self.difficulty_multiplier:.2f}x", True, COLOR_TEXT)
-        self.screen.blit(diff_text, (10, 90))
+        self.screen.blit(diff_text, (10, 130))
         
         # FPS
         fps_text = self.small_font.render(f"FPS: {int(self.clock.get_fps())}", True, COLOR_TEXT)
